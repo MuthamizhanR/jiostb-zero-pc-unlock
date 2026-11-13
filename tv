@@ -1,0 +1,297 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""
+'tv' - All-in-One Termux Smart Controller for Modded Jio Set-Top Box.
+Features:
+- Auto-discovers STB IP across mobile hotspot subnet changes
+- Background connection watchdog (--watchdog)
+- 1-word Chrome Downloads APK installer (tv dl)
+- Smart armeabi-v7a + Android TV APK resolver for GitHub & F-Droid (tv install)
+- Automatic Storage, Overlay, Install & Shevery (Shizuku) permission unlocker (tv fix)
+"""
+import sys
+import os
+import re
+import time
+import json
+import glob
+import socket
+import urllib.request
+import urllib.parse
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+
+IP_FILE = os.path.expanduser("~/.tv_ip")
+
+PRESETS = {
+    "glassio": "https://github.com/mohammadmrh12/glassio",
+    "tvos": "https://github.com/techgenius1/tvOS-Launcher",
+    "aptoidetv": "https://aptoi.de/tv",
+    "projectivy": "https://github.com/spocky/miproja1",
+    "nova": "https://github.com/nova-video-player/aos-AVP",
+    "s0undtv": "https://github.com/S0und/S0undTV",
+    "obtainium": "https://github.com/ImranR98/Obtainium",
+    "neostore": "https://github.com/NeoApplications/Neo-Store",
+    "cloudstream": "https://github.com/recloudstream/cloudstream",
+    "bitchord": "https://github.com/kushagrasinghx/BitChord",
+    "smarttube": "https://github.com/yuliskov/SmartTube",
+    "tvbro": "https://github.com/truefedex/tv-bro",
+    "localsend": "https://github.com/localsend/localsend",
+    "appmanager": "https://github.com/MuntashirAkon/AppManager",
+    "aerialviews": "https://github.com/theothernt/AerialViews",
+    "newpipe": "https://github.com/TeamNewPipe/NewPipe",
+    "aurora": "fdroid:com.aurora.store",
+    "files": "fdroid:me.zhanghai.android.files",
+    "vlc": "fdroid:org.videolan.vlc",
+    "mpv": "fdroid:is.xyz.mpv",
+    "keymapper": "fdroid:io.github.sds100.keymapper",
+    "droidify": "fdroid:com.looker.droidify",
+    "pmx": "fdroid:com.mirfatif.permissionmanagerx",
+    "kodi": "fdroid:org.xbmc.kodi",
+    "taskbar": "fdroid:com.farmerbb.taskbar",
+    "lemuroid": "fdroid:com.swordfish.lemuroid",
+    "jellyfin": "https://github.com/jellyfin/jellyfin-androidtv",
+}
+
+
+def sh(cmd):
+    return subprocess.run(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ).stdout.strip()
+
+
+def check_port(ip, port=5555, timeout=0.5):
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return ip
+    except Exception:
+        return None
+
+
+def get_tv_ip(silent=False):
+    devs = sh("adb devices")
+    m = re.search(r"(\d+\.\d+\.\d+\.\d+):5555\s+device", devs)
+    if m:
+        return m.group(1)
+
+    if os.path.exists(IP_FILE):
+        saved = open(IP_FILE).read().strip()
+        if saved and check_port(saved, 5555, 0.8):
+            sh(f"adb disconnect >/dev/null 2>&1; adb connect {saved}:5555")
+            return saved
+
+    if not silent:
+        print("[*] Auto-searching for Jio TV Box on hotspot...")
+    my_ip = ""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        my_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        out = sh("ip -4 addr show wlan0")
+        m2 = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+        if m2:
+            my_ip = m2.group(1)
+
+    prefix = ".".join(my_ip.split(".")[:3]) if my_ip else "192.168.43"
+    ips = [f"{prefix}.{i}" for i in range(1, 255) if f"{prefix}.{i}" != my_ip]
+    with ThreadPoolExecutor(max_workers=64) as ex:
+        for res in ex.map(check_port, ips):
+            if res:
+                if not silent:
+                    print(f"[+] Found Jio TV Box at: {res}")
+                open(IP_FILE, "w").write(res)
+                sh(f"adb disconnect >/dev/null 2>&1; adb connect {res}:5555")
+                return res
+    if not silent:
+        print("[!] Could not find TV Box. Make sure TV Wi-Fi is connected to your Hotspot!")
+        sys.exit(1)
+    return None
+
+
+def keep_tv_awake():
+    sh("adb shell settings put global wifi_sleep_policy 2 2>/dev/null")
+    sh("adb shell settings put global stay_on_while_plugged_in 3 2>/dev/null")
+    sh("adb shell setprop persist.adb.tcp.port 5555 2>/dev/null")
+
+
+def fix_permissions():
+    print("[+] Unlocking Storage, Install, Overlay, PiP & Shevery permissions for all apps...")
+    keep_tv_awake()
+    sh("adb shell sh /storage/emulated/0/Android/data/com.hamondev.shevery/start.sh 2>/dev/null || true")
+    pkgs = sh("adb shell pm list packages -3").splitlines()
+    for line in pkgs:
+        pkg = line.replace("package:", "").strip()
+        if not pkg:
+            continue
+        for p in [
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.WRITE_SECURE_SETTINGS",
+            "android.permission.DUMP",
+            "android.permission.PACKAGE_USAGE_STATS",
+            "moe.shizuku.manager.permission.API_V23",
+        ]:
+            sh(f"adb shell pm grant {pkg} {p} 2>/dev/null")
+        for op in [
+            "READ_EXTERNAL_STORAGE",
+            "WRITE_EXTERNAL_STORAGE",
+            "MANAGE_EXTERNAL_STORAGE",
+            "LEGACY_STORAGE",
+            "REQUEST_INSTALL_PACKAGES",
+            "SYSTEM_ALERT_WINDOW",
+            "PICTURE_IN_PICTURE",
+            "GET_USAGE_STATS",
+        ]:
+            sh(f"adb shell cmd appops set {pkg} {op} allow 2>/dev/null")
+    print("[★] All app permissions unlocked!")
+
+
+def resolve_url(target):
+    t = target.strip()
+    if t.lower() in PRESETS:
+        t = PRESETS[t.lower()]
+
+    if t.startswith("fdroid:") or "f-droid.org" in t:
+        pkg = t.split("fdroid:")[-1].rstrip("/").split("/")[-1]
+        req = urllib.request.Request(
+            f"https://f-droid.org/api/v1/packages/{pkg}",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        data = json.loads(urllib.request.urlopen(req).read().decode())
+        ver = data.get("suggestedVersionCode") or data["packages"][0]["versionCode"]
+        return f"https://f-droid.org/repo/{pkg}_{ver}.apk"
+
+    if "github.com/" in t and not t.endswith(".apk"):
+        parts = urllib.parse.urlparse(t).path.strip("/").split("/")
+        repo = f"{parts[0]}/{parts[1]}"
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/releases/latest",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        data = json.loads(urllib.request.urlopen(req).read().decode())
+        assets = [
+            a["browser_download_url"]
+            for a in data.get("assets", [])
+            if a["name"].endswith(".apk")
+        ]
+        # 1st priority: Both TV and 32-bit armeabi-v7a
+        for a in assets:
+            al = os.path.basename(a).lower()
+            if "tv" in al and any(k in al for k in ["armeabi-v7a", "arm32", "v7a"]):
+                return a
+        # 2nd priority: TV universal
+        for a in assets:
+            al = os.path.basename(a).lower()
+            if "tv" in al and "arm64" not in al and "x86" not in al:
+                return a
+        # 3rd priority: 32-bit armeabi-v7a
+        for kw in ["armeabi-v7a", "arm32", "v7a", "universal"]:
+            for a in assets:
+                if kw in os.path.basename(a).lower():
+                    return a
+        return assets[0]
+
+    if not t.startswith("http"):
+        q = urllib.parse.quote(f"{t} android")
+        req = urllib.request.Request(
+            f"https://api.github.com/search/repositories?q={q}&per_page=5",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        items = json.loads(urllib.request.urlopen(req).read().decode()).get("items", [])
+        for it in items:
+            try:
+                return resolve_url(it["html_url"])
+            except Exception:
+                continue
+    return t
+
+
+def install_target(target):
+    get_tv_ip()
+    if os.path.exists(os.path.expanduser(target)):
+        apk_path = os.path.expanduser(target)
+    else:
+        url = resolve_url(target)
+        apk_path = os.path.expanduser("~/temp_tv_install.apk")
+        print(f"[+] Downloading APK:\n    {url}")
+        subprocess.run(["curl", "-L", "--progress-bar", "-o", apk_path, url], check=True)
+    print("[+] Installing onto TV...")
+    subprocess.run(["adb", "install", "-r", "-g", apk_path])
+    fix_permissions()
+
+
+def watchdog():
+    while True:
+        ip = get_tv_ip(silent=True)
+        if ip:
+            keep_tv_awake()
+        time.sleep(10)
+
+
+def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--watchdog":
+        watchdog()
+        return
+
+    if len(sys.argv) < 2:
+        ip = get_tv_ip()
+        keep_tv_awake()
+        print(f"\n[⚡] Seamlessly Connected to Jio TV Box ({ip}:5555)!")
+        print("Commands:")
+        print("  tv dl                  -> Install newest APK from Tablet's Downloads folder")
+        print("  tv install <name/link> -> Install by name (glassio, bitchord, smarttube, vlc) or ANY URL")
+        print("  tv fix                 -> Unlock Storage, Overlay, PiP & Installer permissions for all apps")
+        print('  tv type "hello world"  -> Type text onto the TV screen')
+        print('  tv url "https://..."   -> Open a web link on the TV')
+        print("  tv remove <word>       -> Uninstall any TV app matching <word>")
+        print("  tv reboot              -> Restart the TV box\n")
+        return
+
+    cmd = sys.argv[1].lower()
+    arg = " ".join(sys.argv[2:])
+
+    if cmd == "dl":
+        files = glob.glob(os.path.expanduser("~/storage/downloads/*.apk")) + glob.glob(
+            os.path.expanduser("~/storage/downloads/*.APK")
+        )
+        if not files:
+            print("[!] No .apk files found in your Tablet's Downloads folder!")
+            return
+        newest = max(files, key=os.path.getmtime)
+        print(f"[+] Found newest downloaded APK: {os.path.basename(newest)}")
+        install_target(newest)
+    elif cmd in ("install", "i"):
+        install_target(arg)
+    elif cmd == "fix":
+        get_tv_ip()
+        fix_permissions()
+    elif cmd == "type":
+        get_tv_ip()
+        escaped = arg.replace(" ", "%s").replace("'", "\\'").replace('"', '\\"')
+        sh(f'adb shell input text "{escaped}"')
+        print(f"[+] Typed on TV: {arg}")
+    elif cmd == "url":
+        get_tv_ip()
+        sh(f'adb shell am start -a android.intent.action.VIEW -d "{arg}"')
+        print(f"[+] Opened URL on TV: {arg}")
+    elif cmd == "remove":
+        get_tv_ip()
+        pkgs = [
+            l.replace("package:", "").strip()
+            for l in sh("adb shell pm list packages").splitlines()
+            if arg.lower() in l.lower()
+        ]
+        for p in pkgs:
+            print(f"[-] Removing {p}:", sh(f"adb shell pm uninstall --user 0 {p}"))
+    elif cmd == "reboot":
+        get_tv_ip()
+        sh("adb reboot")
+        print("[+] Rebooting TV Box...")
+    else:
+        get_tv_ip()
+        os.system(f"adb shell {' '.join(sys.argv[1:])}")
+
+
+if __name__ == "__main__":
+    main()
